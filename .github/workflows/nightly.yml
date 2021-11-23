@@ -1,0 +1,167 @@
+name: Publish Nightly
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  # enable users to manually trigger with workflow_dispatch
+  workflow_dispatch: {}
+
+jobs:
+  nightly:
+    name: Publish Nightly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v2
+        with:
+          node-version: 14
+
+      - name: (monaco-editor) checkout
+        uses: actions/checkout@v2
+        with:
+          repository: 'microsoft/monaco-editor'
+          path: './monaco-editor'
+
+      - name: (vscode) checkout
+        uses: actions/checkout@v2
+        with:
+          repository: 'microsoft/vscode'
+          path: './vscode'
+
+      - name: (vscode) execute `yarn`
+        working-directory: './vscode'
+        run: yarn --frozen-lockfile --network-timeout 180000
+
+      - name: (vscode) Run Hygiene Checks
+        working-directory: './vscode'
+        run: yarn gulp hygiene
+
+      - name: (vscode) Run Valid Layers Checks
+        working-directory: './vscode'
+        run: yarn valid-layers-check
+
+      - name: (vscode) Compile /build/
+        working-directory: './vscode'
+        run: yarn --cwd build compile
+
+      - name: (vscode) Run eslint
+        working-directory: './vscode'
+        run: yarn eslint
+
+      - name: (vscode) Run Monaco Editor Checks
+        working-directory: './vscode'
+        run: yarn monaco-compile-check
+
+      - name: (vscode) Compile
+        working-directory: './vscode'
+        run: yarn --max_old_space_size=4095 compile
+
+      - name: (vscode) Run Unit Tests (Browser)
+        working-directory: './vscode'
+        run: yarn test-browser --browser chromium
+
+      - name: (vscode) Patch package.json version
+        run: node ./monaco-editor/.github/workflows/nightly/setNightlyVersion.js ./vscode/build/monaco/package.json
+
+      - name: (vscode) Editor Distro
+        working-directory: './vscode'
+        run: yarn gulp editor-distro
+
+      - name: (vscode) Typings validation prep
+        working-directory: './vscode'
+        run: mkdir typings-test
+
+      - name: (vscode) Typings validation
+        working-directory: ./vscode/typings-test
+        run: |
+          yarn init -yp
+          ../node_modules/.bin/tsc --init
+          echo "import '../out-monaco-editor-core';" > a.ts
+          ../node_modules/.bin/tsc --noEmit
+
+      - name: (vscode) Webpack Editor
+        working-directory: ./vscode/test/monaco
+        run: yarn run bundle
+
+      - name: (vscode) Compile Editor Tests
+        working-directory: ./vscode/test/monaco
+        run: yarn run compile
+
+      - name: (vscode) Download Playwright
+        working-directory: ./vscode
+        run: yarn playwright-install
+
+      - name: (vscode) Run Editor Tests
+        timeout-minutes: 5
+        working-directory: ./vscode/test/monaco
+        run: yarn test
+
+      - name: Set `npm` config
+        run: npm config set //registry.npmjs.org/:_authToken ${NPM_TOKEN}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish `monaco-editor-core`
+        working-directory: './vscode/out-monaco-editor-core'
+        run: npm publish --tag next
+
+      - name: Delete `npm` config
+        run: npm config delete //registry.npmjs.org/:_authToken
+
+      - name: (monaco-editor) Patch package.json version
+        run: node ./monaco-editor/.github/workflows/nightly/setNightlyVersion.js ./monaco-editor/package.json
+
+      - name: (monaco-editor) execute `npm ci` (1)
+        working-directory: './monaco-editor'
+        run: npm ci
+
+      - name: (monaco-editor) execute `npm ci` (2)
+        working-directory: './monaco-editor/webpack-plugin'
+        run: npm ci
+
+      - name: (monaco-editor) Use local monaco-editor-core
+        run: node ./monaco-editor/.github/workflows/nightly/useLocalMonacoEditorCore.js
+
+      - name: (monaco-editor) execute `npm install` to pick up local monaco-editor-core
+        working-directory: './monaco-editor/webpack-plugin'
+        run: npm install
+
+      - name: (monaco-editor) Install OS Dependencies for Playwright
+        working-directory: './monaco-editor'
+        run: sudo npm run playwright-install-deps
+
+      - name: (monaco-editor) Check prettier
+        working-directory: './monaco-editor'
+        run: npm run prettier-check
+
+      - name: (monaco-editor) Build
+        working-directory: './monaco-editor'
+        run: npm run release
+
+      - name: (monaco-editor) Run unit tests
+        working-directory: './monaco-editor'
+        run: npm test
+
+      - name: (monaco-editor) Compile webpack plugin
+        working-directory: './monaco-editor'
+        run: npm run compile --prefix webpack-plugin
+
+      - name: (monaco-editor) Package using webpack plugin
+        working-directory: './monaco-editor'
+        run: npm run smoketest --prefix webpack-plugin
+
+      - name: (monaco-editor) Run smoke test
+        working-directory: './monaco-editor'
+        run: npm run smoketest
+
+      - name: (monaco-editor) Build website
+        working-directory: './monaco-editor'
+        run: npm run build-website
+
+      - name: Set `npm` config
+        run: npm config set //registry.npmjs.org/:_authToken ${NPM_TOKEN}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish `monaco-editor`
+        working-directory: './monaco-editor/release'
+        run: npm publish --tag next
